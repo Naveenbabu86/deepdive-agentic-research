@@ -1,150 +1,186 @@
-# DeepDive — Self-Verifying Research Analyst
+# DeepDive — Evidence-Grounded Research Platform
 
-DeepDive is a research prototype designed around one principle: **a citation is not accepted just because a URL exists**. Claims are drafted from retrieved evidence, independently checked against the cited source text, and either supported, contradicted, or marked insufficient. Weak research areas trigger a bounded research loop. Each run stores a traceable audit trail.
+DeepDive is a multi-agent research application that turns a question into a structured report with traceable sources and claim-level evidence checks. It is designed to make the research process inspectable: users can review the source passages behind findings, see which claims were supported or rejected, and follow the system's research decisions.
 
-> Competition requirement: all LLM/AI model calls must route through Mesh API. The shared `MeshLLM` client uses `https://api.meshapi.ai/v1` and `MESH_API_KEY`. Do not add direct provider SDK calls elsewhere in the codebase.
+The platform combines a FastAPI service, a LangGraph workflow, web search, optional semantic retrieval, a source-aware verification pipeline, and a Streamlit interface. It emphasizes evidence traceability and explicit uncertainty rather than treating the presence of a citation as proof that a claim is correct.
 
-## What is implemented
+> **Deployment status:** DeepDive is a production-oriented software project with defensive controls and automated tests. It should not be considered production-certified until live provider integration, security, privacy, load, and operational testing have been completed in the intended deployment environment.
 
-- FastAPI `/research` and `/health` endpoints, request validation, and run lookup.
-- Five distinct LangGraph roles coordinated through explicit edges: Planner → Researcher → Claim Drafter → Verifier → (targeted Researcher retry or Synthesizer). The agents pass structured state—sub-questions, sources, claims, statuses, and evidence quotes—between nodes.
-- Real web search through Tavily plus best-effort source page extraction.
-- Optional Qdrant Cloud semantic evidence index: source passages are chunked and embedded locally with FastEmbed, stored in Qdrant, and ranked for the current research run. Qdrant outages fall back to fresh web evidence; only current-run payloads are retrieved to avoid silently reusing stale evidence across research questions.
-- Optional Redis cache for deterministic LLM completions and session-scoped follow-up memory. Cache keys are hashes of the exact model, messages, and request parameters; prior-run memory is planner context only and never evidence. Redis is optional and the workflow continues without it if unavailable.
-- Stable source IDs, source-quality hints, retained source passages, and source URLs.
-- Claim-by-claim verification against each cited source.
-- A deterministic quote-presence check: a model's “supported” decision is downgraded unless its evidence quote appears in the retrieved passage (whitespace/case normalized). The Synthesizer independently repeats this check against the exact cited source before including a claim.
-- Bounded verifier-to-research loop for thinly supported areas.
-- SQLite audit events, source records, claim decisions, and final run status.
-- Streamlit UI showing the report, sources, claim decisions, visible evidence quotes, agent/routing decision trail, self-measured metrics, and JSON/Markdown exports.
-- A report filter that excludes unsupported claims from “Verified findings” and explicitly lists excluded claim IDs and reasons, making rejection inspectable in a demo.
-- Offline unit tests for schemas, audit persistence, and quote-check enforcement.
+## Core capabilities
 
-## Security and production hardening
-
-The application now includes the following defensive controls:
-
-- `ENVIRONMENT=staging` or `ENVIRONMENT=production` requires `DEEPDIVE_API_KEY` (at least 32 characters); provide it as `X-API-Key` or a Bearer token. The `/health` endpoint remains public and `/ready` checks required credentials and persistence.
-- API-key comparison uses constant-time comparison; production API errors avoid returning raw exception messages or provider response bodies.
-- Per-process request rate limiting and a bounded number of concurrent research runs protect against accidental overload. For multi-worker or public deployments, put a shared gateway/WAF/Redis rate limiter in front; per-process limits are not a distributed quota system.
-- Retrieved URLs are restricted to HTTP(S), local/private/reserved IP targets are rejected, and redirects are not followed. DNS checks alone cannot fully eliminate DNS-rebinding risk; use an outbound egress firewall or controlled fetch proxy in production.
-- Mesh API calls use bounded retries for transient connection, timeout, rate-limit, and server errors. Search failures are recorded by error type, not raw exception strings.
-- SQLite uses WAL mode, a busy timeout, and indexes for common audit queries. Use managed PostgreSQL or another shared database before horizontal multi-instance deployment.
-- The UI supports an API key field for protected backend deployments.
-
-Local learning mode defaults to `ENVIRONMENT=development` and does not require an API key. Do not expose that mode directly to the public internet.
-
-## Important limitations before final submission
-
-This is a competition-oriented implementation, not a guarantee of factual correctness. LLM-based verification can make mistakes. Exact quote matching prevents fabricated quotations but does not by itself prove that a quotation logically entails a claim. The lexical coverage heuristic is intentionally simple and should be upgraded/tested. Source-quality classification is a transparent domain-hint heuristic, not a definitive trust score. Search/page extraction varies by site, and some pages block automated retrieval.
-
-Before final submission, run an independently labeled evaluation set and report measured citation-support precision, unsupported-claim rejection rate, contradiction detection, coverage, and latency. The runtime metrics added here are transparent proxies: `matched_citation_coverage` checks whether citation quotes occur in their cited source passages, and `source_matched_claim_rate` measures claims included after deterministic quote checks. Neither is a semantic entailment score or a guarantee of truth. Do not describe unmeasured results as achievements. Live provider integration, penetration testing, and load testing remain required before production deployment.
+- **Multi-agent research workflow:** Planner, Researcher, Claim Drafter, Verifier, and Synthesizer roles operate through an explicit LangGraph state graph.
+- **Source-grounded claims:** Research findings retain source identifiers, URLs, and retrieved passages so users can inspect the evidence.
+- **Claim-level verification:** The Verifier evaluates claims against cited passages. Deterministic quote-presence checks downgrade a supported decision when its quoted evidence cannot be found in the retrieved passage.
+- **Bounded research retry:** Thinly supported areas can trigger a limited additional research round rather than an unbounded agent loop.
+- **Conservative report synthesis:** The Synthesizer rechecks quote presence and excludes claims that do not pass the report's verification rules.
+- **Inspectable decision trail:** The interface displays research results, sources, claim decisions, evidence quotes, audit events, and runtime metrics.
+- **Web research:** Tavily provides search results, with best-effort extraction of source-page content.
+- **Optional semantic evidence retrieval:** Qdrant Cloud can index passages discovered during the current research run. If vector retrieval is unavailable, the workflow can continue with web evidence.
+- **Optional Redis features:** Redis can provide deterministic completion caching and session-scoped follow-up context. Historical context helps interpret follow-up questions; it is not treated as evidence for new claims.
+- **Audit persistence:** SQLite stores run status, source records, claim decisions, and audit events.
+- **Developer-friendly API and UI:** FastAPI exposes research and run lookup endpoints; Streamlit provides an interactive interface and report exports.
 
 ## Architecture
 
 ```text
-Streamlit UI
-    | HTTP
-FastAPI (/research)
-    |
+Streamlit interface
+       | HTTP
+       v
+FastAPI service
+  /research, /runs/{run_id}, health/readiness
+       |
+       v
 LangGraph coordinator
-    ├── Planner: decomposes the user question
-    ├── Researcher: plans queries and calls Tavily web search
-    ├── Claim Drafter: turns retrieved evidence into atomic claims
-    ├── Verifier: checks each claim against each cited passage
-    |      └── thin/unsupported coverage -> bounded research retry
-    └── Synthesizer: builds a report from supported claims only
-    |
-Mesh API shared client (all LLM calls)
-    |
-SQLite audit store: runs, events, sources, claims
+  Planner
+    -> Researcher -> Claim Drafter -> Verifier
+                                      |
+                         bounded retry when needed
+                                      |
+                                      v
+                                 Synthesizer
+       |
+       +--> Tavily web search and source extraction
+       +--> Optional Qdrant semantic evidence retrieval
+       +--> Optional Redis cache and follow-up context
+       +--> SQLite audit store
+       |
+       v
+Shared Mesh API client for all LLM requests
 ```
 
-## Requirements
+### Agent responsibilities
 
-- Python 3.11 recommended
-- A Mesh API key (`MESH_API_KEY`) for model calls
-- A Tavily API key (`TAVILY_API_KEY`) for real web search
-- Internet access from the environment running DeepDive
+| Component | Responsibility |
+|---|---|
+| Planner | Interprets the question and organizes it into research sub-questions. |
+| Researcher | Searches for relevant web sources and gathers source passages. |
+| Claim Drafter | Converts retrieved evidence into discrete, source-linked claims. |
+| Verifier | Evaluates each claim against the source passage and records a verification status. |
+| Synthesizer | Produces a readable report from claims that pass the configured verification and quote checks. |
 
-## Setup (Windows PowerShell or macOS/Linux shell)
+## Evidence handling and known limitations
 
-1. Create and activate a virtual environment:
+DeepDive includes deterministic checks, but no automated verification system can guarantee factual correctness. In particular:
 
-   ```bash
-   python -m venv .venv
-   ```
+- Finding an exact quotation in a source does **not** prove that the quotation logically entails the associated claim.
+- Model-based verification can misclassify support, contradiction, or uncertainty.
+- Source-quality hints are heuristic indicators, not definitive trust scores.
+- Web search coverage and page extraction vary by publisher; some websites block automated access or return incomplete content.
+- Qdrant retrieval is an optional aid for ranking passages found during the current run. It does not replace web search or claim verification.
+- The included benchmark is a small synthetic test set. It is useful for regression testing but is not an independent measure of real-world factual accuracy.
 
-   Windows PowerShell:
+Before using DeepDive for high-impact decisions, evaluate it on a representative, human-labeled dataset. Measure citation-support precision, unsupported-claim rejection, contradiction detection, sub-question coverage, and end-to-end latency. Record the dataset construction, sample size, model, date, and failures. Do not interpret the application's runtime proxy metrics as validated accuracy scores.
 
-   ```powershell
-   .\.venv\Scripts\Activate.ps1
-   ```
+## Security and operational controls
 
-   macOS/Linux:
+The application includes several defensive measures:
 
-   ```bash
-   source .venv/bin/activate
-   ```
+- Staging and production environments require a configured `DEEPDIVE_API_KEY` of at least 32 characters. Requests can provide it through `X-API-Key` or a Bearer token.
+- The health endpoint remains public; the readiness endpoint checks required configuration and persistence.
+- API-key comparison uses constant-time comparison. Production API errors avoid exposing raw exception messages or provider response bodies.
+- Per-process request rate limiting and a cap on concurrent research runs reduce accidental overload. These controls are not a distributed quota system.
+- Retrieved URLs are restricted to HTTP(S), local/private/reserved IP targets are rejected, and redirects are not followed. DNS validation alone cannot eliminate all DNS-rebinding risks.
+- LLM requests use bounded retries for selected transient failures. Search errors are recorded by type rather than raw exception strings.
+- SQLite uses WAL mode, a busy timeout, and indexes for common audit queries.
+- Redis is optional; the workflow can continue when it is unavailable.
 
-2. Install dependencies:
+**Before a public or multi-instance deployment:**
 
-   ```bash
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+1. Put the service behind HTTPS and a gateway, WAF, or shared rate limiter.
+2. Apply outbound network controls or a controlled fetch proxy to reduce SSRF and DNS-rebinding risk.
+3. Use a managed shared database such as PostgreSQL for multi-instance operation; local SQLite is intended for a single-instance setup.
+4. Configure secrets through a secret manager or protected environment configuration, never in source code or container images.
+5. Add centralized logs, monitoring, alerts, backups, retention controls, and a recovery procedure.
+6. Test prompt-injection defenses, provider failures, concurrency limits, authentication, authorization, and abuse scenarios.
+7. Review privacy and retention requirements because research questions, retrieved passages, claims, and reports may be persisted.
 
-3. Create your local `.env` from `.env.example`, then set real credentials:
+Local development defaults to `ENVIRONMENT=development` and does not require an API key. **Do not expose development mode directly to the public internet.**
 
-   ```env
-   MESH_API_KEY=rsk_your_real_key
-   MESH_MODEL=openai/gpt-4o
-   MESH_BASE_URL=https://api.meshapi.ai/v1
-   TAVILY_API_KEY=tvly_your_real_key
-   ENVIRONMENT=development
-   # For staging/production, set ENVIRONMENT=production and generate a secret >= 32 chars.
-   DEEPDIVE_API_KEY=replace_with_a_random_secret_at_least_32_characters
-   ```
+## Technology stack
 
-   Never commit `.env`. `.gitignore` already excludes it. Verify that the chosen model ID is available to your Mesh account.
+- Python 3.11 or newer
+- FastAPI and Uvicorn
+- LangGraph for workflow orchestration
+- Mesh API through a shared OpenAI-compatible client for LLM requests
+- Tavily for web search
+- Streamlit for the user interface
+- SQLite for local audit persistence
+- Optional Qdrant Cloud with local FastEmbed embeddings
+- Optional Redis for caching and session-scoped follow-up context
+- Pytest for automated tests
 
-   Optional Redis caching and follow-up memory are disabled by default. To enable them, set `REDIS_URL` to a trusted Redis endpoint. `LLM_CACHE_TTL_SECONDS` defaults to 1800; `REDIS_MEMORY_TTL_SECONDS` defaults to 30 days and `REDIS_MEMORY_MAX_RUNS` to 5 per Streamlit session. Only exact temperature-zero completions are cached. Memory contains prior questions and supported-claim summaries, is used only to help the planner interpret follow-ups, and is never passed to the drafter/verifier as evidence. Every run still searches for fresh sources. Redis may contain prompt-derived outputs and history; secure it with authentication, network restrictions, and TLS when remote.
+All runtime LLM calls use the configured Mesh API endpoint. Keep the shared client as the single integration point for model requests.
 
-4. Start FastAPI in terminal 1:
+## Prerequisites
 
-   ```bash
-   uvicorn app.main:app --reload
-   ```
+- Python 3.11+
+- A Mesh API key and a model identifier available to your account
+- A Tavily API key for live web search
+- Internet access from the machine running the application
 
-5. Check `http://127.0.0.1:8000/health` and open `http://127.0.0.1:8000/docs`.
+Qdrant Cloud and Redis are optional. You can run the base workflow without configuring either service.
 
-6. Start the UI in terminal 2:
+## Local setup
 
-   ```bash
-   streamlit run streamlit_app.py
-   ```
+### 1. Create and activate a virtual environment
 
-7. Submit a research question in the UI. A full run can take time because the system calls multiple agents and performs real web research.
+**Windows PowerShell**
 
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+```
 
-## Qdrant Cloud semantic evidence retrieval (optional)
+**macOS/Linux**
 
-1. Create a free Qdrant Cloud cluster in the Qdrant console and copy its cluster URL and API key. The free tier is limited and may suspend after inactivity; see the official [Qdrant pricing page](https://qdrant.tech/pricing/).
-2. Add `QDRANT_URL`, `QDRANT_API_KEY`, `QDRANT_COLLECTION=deepdive_evidence`, and `QDRANT_TOP_K=8` to your local `.env`. Do not add credentials to Git.
-3. Install the optional vector dependencies: `python -m pip install "qdrant-client[fastembed]>=1.14,<2.0"`.
-4. Restart FastAPI and run a research question. Inspect the run audit trail for the `qdrant_retrieval` event. If Qdrant is blank or unavailable, the workflow falls back to the existing web-source order.
+```bash
+python -m venv .venv
+source .venv/bin/activate
+```
 
-FastEmbed downloads/uses the embedding model locally; no separate paid embedding API is used. Vector retrieval ranks sources already found in the current run; it does not replace Tavily search or the verifier's exact-source quote checks. This first implementation intentionally does not reuse old-run evidence, to reduce stale-source risk.
+### 2. Install dependencies
 
-## Redis cache and follow-up memory (optional)
+```bash
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+```
 
-Install dependencies from `requirements.txt`, start or provision Redis, then set `REDIS_URL` in `.env` (for a local Redis service, commonly `redis://localhost:6379/0`). The LLM cache uses a SHA-256 key over the exact endpoint, model, messages, and completion parameters; raw prompts are not used as Redis key names. Only deterministic temperature-zero completions are cached, while search results remain fresh. Follow-up memory is scoped to the Streamlit browser session and stores only prior questions plus supported-claim text. The planner may use it as historical context; it is not supplied as evidence to later agents. Both features fail open when Redis is unavailable.
+### 3. Configure environment variables
 
-## AWS cost-aware deployment
+Copy `.env.example` to `.env` and set your local credentials. The following illustrates the main settings; use the exact model identifier supported by your Mesh account.
 
-Read [`deploy/aws-cost-aware-deployment.md`](deploy/aws-cost-aware-deployment.md) before deploying. There is no guaranteed always-free AWS service that comfortably hosts both the long-running FastAPI research workflow and Streamlit UI. App Runner/ECS can incur charges while provisioned. For a low-cost demo, consider Streamlit Community Cloud for the UI and AWS for a backend only if your account's Free Tier/credits make the actual usage free. If both must be on AWS, a small EC2 Docker deployment may be the simplest, but it is not universally free; configure billing alarms first.
+```dotenv
+MESH_API_KEY=your_mesh_api_key
+MESH_MODEL=openai/gpt-4o
+MESH_BASE_URL=https://api.meshapi.ai/v1
+TAVILY_API_KEY=your_tavily_api_key
+ENVIRONMENT=development
+DEEPDIVE_API_KEY=replace_with_a_random_secret_at_least_32_characters
+```
 
-## API example
+Never commit `.env` or put real credentials in `.env.example`, logs, screenshots, or container images. For staging or production, set `ENVIRONMENT=production` and configure a strong `DEEPDIVE_API_KEY`.
+
+### 4. Start the API
+
+```bash
+uvicorn app.main:app --reload
+```
+
+Check service health at [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health). Interactive API documentation is available at [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs).
+
+### 5. Start the Streamlit interface
+
+In a second terminal with the virtual environment activated:
+
+```bash
+streamlit run streamlit_app.py
+```
+
+Submit a research question in the interface. A complete run can take time because multiple agents and external web research are involved.
+
+## API usage
+
+Example request:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/research \
@@ -152,112 +188,121 @@ curl -X POST http://127.0.0.1:8000/research \
   -d '{"question":"What are the major risks in the EV battery market in 2026?","max_research_rounds":2}'
 ```
 
-For staging/production, add `-H "X-API-Key: $DEEPDIVE_API_KEY"` to API requests.
+For staging or production, include the configured API key:
 
-Response contains `run_id`, report Markdown, sub-questions, sources, claims with verification statuses, audit events, and a metrics snapshot. Fetch a saved run later with `GET /runs/{run_id}`.
+```bash
+curl -X POST http://127.0.0.1:8000/research \
+  -H "Content-Type: application/json" \
+  -H "X-API-Key: YOUR_DEEPDIVE_API_KEY" \
+  -d '{"question":"Summarize recent developments in grid-scale energy storage.","max_research_rounds":2}'
+```
 
-## Test and compile
+The response includes a run identifier, report Markdown, sub-questions, sources, claims and verification statuses, audit events, and a metrics snapshot. Retrieve a saved run using `GET /runs/{run_id}`.
 
-Offline tests do not require live credentials:
+## Optional Qdrant Cloud retrieval
+
+Qdrant adds semantic ranking for source passages gathered during the current research run.
+
+1. Create a Qdrant Cloud cluster and obtain its URL and API key. Check the provider's current pricing and usage limits before relying on a free tier.
+2. Add these values to `.env`:
+
+   ```dotenv
+   QDRANT_URL=your_qdrant_cluster_url
+   QDRANT_API_KEY=your_qdrant_api_key
+   QDRANT_COLLECTION=deepdive_evidence
+   QDRANT_TOP_K=8
+   ```
+
+3. Install the optional vector dependency:
+
+   ```bash
+   python -m pip install "qdrant-client[fastembed]>=1.14,<2.0"
+   ```
+
+4. Restart the API and run a research query. Inspect the audit trail for the `qdrant_retrieval` event.
+
+FastEmbed runs the embedding model locally. Qdrant is an optional retrieval aid and does not replace fresh web research or the verifier's source-level checks. If Qdrant is unavailable, the workflow falls back to its web-source path.
+
+## Optional Redis cache and follow-up context
+
+Set `REDIS_URL` in `.env` to enable Redis-backed features. For a local Redis service, a typical URL is `redis://localhost:6379/0`.
+
+- The completion cache hashes the endpoint, model, messages, and request parameters. Only deterministic temperature-zero completions are cached; web search remains fresh.
+- Follow-up context is scoped to the Streamlit session and stores prior questions and supported-claim summaries. It can help the Planner interpret a follow-up but is not supplied to later agents as evidence.
+- Both features fail open when Redis is unavailable.
+
+Remote Redis should use authentication, network restrictions, and TLS. Treat cached content and session history as potentially sensitive.
+
+## Testing and evaluation
+
+Run the offline test suite:
 
 ```bash
 python -m compileall -q app streamlit_app.py
 pytest -q
 ```
 
-Live integration testing requires working Mesh and Tavily keys. Never put credentials in test fixtures or logs.
+Offline tests use controlled test doubles and do not validate live provider behavior or semantic factual accuracy. Live integration testing requires valid Mesh and Tavily credentials.
 
-## Runtime metrics and visible rejection
-
-The app computes the following metrics from each run and shows them in the UI:
-
-- `claims_evaluated`, `claims_supported_by_verifier`, `claims_contradicted`, and `claims_insufficient` count verifier outcomes.
-- `claims_in_final_report` and `claims_excluded_from_final_report` show the report filter decision.
-- `matched_citation_coverage` is the fraction of source citations attached to verifier-supported claims whose stored evidence quotes still match the exact cited source passage after normalization.
-- `source_matched_claim_rate` is the fraction of all evaluated claims that survive the verifier status and deterministic source-quote gate.
-- `verifier_support_rate` is the fraction of claims the model verifier labels supported, before the final report filter.
-
-These metrics are self-measured implementation signals, not externally validated accuracy scores. To demonstrate rejection, inspect a `report_filter_applied` audit event and a claim listed under **Claims not included as verified facts**; it must not appear under **Verified findings**. The exact quote is displayed beside each included finding so reviewers can inspect the citation relationship.
-
-## Labeled verifier benchmark (new)
-
-A small, versioned synthetic benchmark is included at `benchmarks/verification_cases.json`. It contains manually labeled supported, unsupported, contradicted, partial-support, negation, number/date, entity, forecast, and conflicting-source cases. It is designed to reveal common failure modes, not to stand in for an independent real-world benchmark.
-
-Run the live model evaluation from the repository root after configuring `MESH_API_KEY`:
+A small labeled synthetic benchmark is included at `benchmarks/verification_cases.json`. After configuring `MESH_API_KEY`, run:
 
 ```bash
 python -m scripts.evaluate_verifier --output artifacts/verification-benchmark-results.json
 ```
 
-This makes one or more live Mesh API calls per case and may incur API cost. The command writes per-case expected/actual labels and summary measures: exact status accuracy, supported-claim precision, unsupported-claim rejection rate, and contradiction detection rate. It exits non-zero if any case differs from its expected label; inspect the individual rows rather than optimizing solely for a perfect score on this small set. Keep the raw result artifact with the submission and report the benchmark version, case count, model, date, and any failures. Never fabricate or hand-edit measured scores.
+This command makes live model calls and may incur API costs. It records expected and actual labels and computes summary measures such as status accuracy, supported-claim precision, unsupported-claim rejection, and contradiction detection. Inspect per-case results; a small synthetic benchmark should not be treated as proof of general accuracy.
 
-The offline unit tests check the scorer and fail-closed aggregation behavior using controlled test doubles; they do **not** measure the real model's semantic verification ability. In particular, a model can still incorrectly label a contradictory claim as supported if it provides a quote that exists in the passage. The live labeled benchmark is intended to expose that risk, not eliminate it.
+### Runtime metrics
 
-## Self-evaluation plan
+The application displays implementation metrics in the UI, including:
 
-Use a versioned test set containing multiple domains and examples of:
+- `claims_evaluated`, `claims_supported_by_verifier`, `claims_contradicted`, and `claims_insufficient`
+- `claims_in_final_report` and `claims_excluded_from_final_report`
+- `matched_citation_coverage`, a deterministic measure of whether stored evidence quotes still match cited passages
+- `source_matched_claim_rate`, the fraction of evaluated claims that pass the configured verifier-status and quote-presence checks
+- `verifier_support_rate`, the fraction of claims labeled supported by the model verifier before the final report filter
 
-1. A claim directly supported by a passage.
-2. A claim with a real citation that does not support it.
-3. A contradicted claim.
-4. An unsupported number/date/forecast.
-5. Conflicting reputable sources.
-6. A sub-question with initially thin evidence that improves after retry.
-7. A question where evidence remains insufficient after the retry budget.
+These are diagnostic signals, not externally validated factual-accuracy scores. For an auditable example, inspect a `report_filter_applied` event and confirm that excluded claims do not appear under **Verified findings**.
 
-Have a human label each claim/source pair before evaluating. Report at minimum:
+## Deployment notes
 
-- **Citation support precision:** accepted claims actually supported / all accepted claims.
-- **Unsupported-claim rejection rate:** known unsupported claims rejected / all known unsupported claims.
-- **Contradiction detection rate:** known contradictions flagged / all known contradictions.
-- **Sub-question coverage:** adequately supported sub-questions / total sub-questions.
-- **Loop success rate:** initially thin areas adequately supported after retries / initially thin areas.
-- Median and p95 run latency, source count, and model-call count.
+The root Dockerfile provides a convenient containerized starting point. It is not a complete multi-service production topology. For a persistent deployment, run the API and UI as separate services, provide durable storage, configure HTTPS, central logs and monitoring, and use a shared database when scaling beyond one instance.
 
-Include sample size and test-set construction in the README. Keep a few manually inspected example runs and show at least one unsupported claim rejected in the demo. Do not claim a target score unless measured.
+See [the cost-aware AWS deployment guide](deploy/aws-cost-aware-deployment.md) before provisioning cloud resources. Compute, storage, networking, public IPv4, and managed-service costs depend on account eligibility and actual usage. Check current pricing and configure billing alerts before creating resources.
 
-## GitHub and hackathon checklist
+## Troubleshooting
 
-- [ ] Create a public repository and push the project source.
-- [ ] Add GitHub Actions secrets `MESH_API_KEY` and `SUBMISSION_TOKEN` (and `TAVILY_API_KEY` for live research tests if needed).
-- [ ] Download the organizer-provided workflow from `https://careerapi-production.krishnaik.in/api/ci/hackathons/agent-arena-2026/workflow.yml` and save it as `.github/workflows/agent-arena-2026-checks.yml`. The included `ci.yml` is a project test workflow and **is not a substitute** for the organizer's official checks.
-- [ ] Push a commit and inspect both GitHub Actions and the submission dashboard.
-- [ ] Run a live end-to-end test with valid Mesh/Tavily credentials.
-- [ ] Deploy only behind HTTPS and a shared rate limiter/WAF; configure a strong `DEEPDIVE_API_KEY` and a network egress policy.
-- [ ] Decide on audit-data retention and access policies; SQLite currently stores research questions, source passages, claims, and reports in plaintext on disk.
-- [ ] Add actual self-evaluation results after executing the fixed test set.
-- [ ] Record a short demo that visibly shows a claim rejected or marked insufficient and the system re-researching a gap.
-- [ ] Review license/terms of the search provider and source websites before deployment.
+### Model prompt or rate-limit errors
 
-## Security notes
+Research invokes multiple agents, so one user request can result in several model calls. If the provider reports an oversized prompt or rate limit, reduce concurrent runs and research scope, then retry after the provider's quota window resets. Provider limits depend on the model and account.
 
-- `.env` is ignored; use repository secrets in CI.
-- Do not return stack traces or API keys to clients.
-- The demo is not hardened for anonymous public production use. Add auth, rate limits, request quotas, robust retry/backoff, and monitoring before public deployment.
-- Treat retrieved web pages as untrusted input. The agents are instructed to treat content as evidence, not instructions; additional prompt-injection defenses and source sanitization should be tested before deployment.
+### LangSmith tracing errors
 
+LangSmith tracing is optional. If it is not configured, disable tracing in the local environment rather than placing an invalid tracing key in the project. Tracing authentication errors are separate from Mesh model-request errors.
 
-## Troubleshooting: oversized model prompts and LangSmith warnings
+### Missing or incomplete source pages
 
-If a provider reports an error such as `413 Request too large` or a tokens-per-minute (TPM) limit, the Drafter now packs at most eight relevance-ranked sources, bounds each evidence passage, caps the response at 1,200 tokens, and asks for at most 12 claims. This reduces prompt size while preserving source IDs for verification. TPM is also a time-window quota shared across calls, so if the provider still returns a rate-limit error, wait for the window to reset and reduce concurrent runs. The API returns a controlled `502` for provider status errors rather than reporting them as an application `500`.
+Some websites block automated extraction, require scripts, or return partial content. Review the saved source passage and URL in the interface. A URL alone is not sufficient evidence for a verified finding.
 
-DeepDive's hackathon configuration requires model requests to pass through Mesh. In your local `.env`, use the Mesh endpoint and a model supported by your Mesh account, for example:
+## Project layout
 
-```dotenv
-MESH_BASE_URL=https://api.meshapi.ai/v1
-MESH_API_KEY=REDACTED
-MESH_MODEL=openai/gpt-4o
-LANGSMITH_TRACING=false
-LANGCHAIN_TRACING_V2=false
+```text
+app/
+  agents/       Planner, Researcher, Drafter, Verifier, Synthesizer
+  services/     LLM client, search, evidence retrieval, cache, audit, evaluation
+  config.py     Validated application settings
+  graph.py      LangGraph workflow
+  main.py       FastAPI endpoints
+  schemas.py    Request and response models
+streamlit_app.py
+benchmarks/     Synthetic verification cases
+tests/          Offline automated tests
+scripts/        Evaluation utilities
+deploy/         Deployment guidance
+Dockerfile
+requirements.txt
 ```
 
-Do not use a direct provider endpoint such as `https://api.groq.com/openai/v1` for this submission if the rule is that every model call must route through Mesh. If you intentionally choose direct Groq for local debugging, the call no longer demonstrates the required Mesh routing. The exact model name must be available through your Mesh account.
+## Responsible use
 
-The LangSmith `401 Unauthorized` messages are optional tracing failures, separate from the model's 413/TPM error. Leave tracing disabled as above unless you have configured a valid `LANGSMITH_API_KEY`. On Windows Command Prompt, you can disable it for the current terminal session with:
-
-```bat
-set LANGSMITH_TRACING=false
-set LANGCHAIN_TRACING_V2=false
-```
-
-Restart Uvicorn after changing environment variables. Never paste API keys into logs, source code, or screenshots.
+DeepDive is a research-assistance tool, not a substitute for expert review. Verify important findings against original sources, pay attention to contradictory evidence, and retain human review for decisions with legal, financial, medical, safety, or other significant consequences.
