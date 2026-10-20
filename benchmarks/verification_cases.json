@@ -1,0 +1,82 @@
+{
+  "benchmark_name": "DeepDive claim verification smoke benchmark",
+  "version": "1.0.0",
+  "labeling_note": "Expected labels are manually assigned for these synthetic passages. This is a small diagnostic set, not an independent or representative accuracy benchmark.",
+  "cases": [
+    {
+      "id": "support_direct_fact",
+      "claim": "The library opened in 2020.",
+      "expected_status": "supported",
+      "sources": [{"source_id": "S1", "title": "Library announcement", "url": "https://example.org/library", "content": "The city library officially opened to the public in 2020."}]
+    },
+    {
+      "id": "unsupported_unmentioned_number",
+      "claim": "Lithium prices increased by 80% during the year.",
+      "expected_status": "insufficient",
+      "sources": [{"source_id": "S1", "title": "Market note", "url": "https://example.org/market", "content": "Lithium prices fluctuated during the year, affecting battery input costs."}]
+    },
+    {
+      "id": "contradicted_year",
+      "claim": "The library opened in 2020.",
+      "expected_status": "contradicted",
+      "sources": [{"source_id": "S1", "title": "Library history", "url": "https://example.org/history", "content": "The city library opened in 2018 after a two-year construction project."}]
+    },
+    {
+      "id": "negation_contradiction",
+      "claim": "The company did not launch the product in March.",
+      "expected_status": "contradicted",
+      "sources": [{"source_id": "S1", "title": "Launch release", "url": "https://example.org/launch", "content": "The company launched the product on March 12."}]
+    },
+    {
+      "id": "number_contradiction",
+      "claim": "The survey found that 40% of users preferred option A.",
+      "expected_status": "contradicted",
+      "sources": [{"source_id": "S1", "title": "Survey results", "url": "https://example.org/survey", "content": "In the survey, 14% of users said they preferred option A."}]
+    },
+    {
+      "id": "partial_support_missing_detail",
+      "claim": "The city opened three libraries in 2020.",
+      "expected_status": "insufficient",
+      "sources": [{"source_id": "S1", "title": "Library announcement", "url": "https://example.org/library", "content": "The city library officially opened to the public in 2020."}]
+    },
+    {
+      "id": "related_but_not_entailing",
+      "claim": "The new policy reduced operating costs by 25%.",
+      "expected_status": "insufficient",
+      "sources": [{"source_id": "S1", "title": "Policy summary", "url": "https://example.org/policy", "content": "The new policy was introduced to improve operational efficiency. The summary did not report measured cost savings."}]
+    },
+    {
+      "id": "direct_support_with_qualifier",
+      "claim": "The pilot reduced average processing time from 10 minutes to 7 minutes.",
+      "expected_status": "supported",
+      "sources": [{"source_id": "S1", "title": "Pilot evaluation", "url": "https://example.org/pilot", "content": "During the pilot, average processing time fell from 10 minutes to 7 minutes."}]
+    },
+    {
+      "id": "conflicting_sources",
+      "claim": "The bridge opened in 2021.",
+      "expected_status": "insufficient",
+      "sources": [
+        {"source_id": "S1", "title": "City page", "url": "https://example.org/city", "content": "The bridge opened to traffic in 2021."},
+        {"source_id": "S2", "title": "Project report", "url": "https://example.org/project", "content": "The bridge opened to traffic in 2022."}
+      ]
+    },
+    {
+      "id": "unsupported_forecast",
+      "claim": "The product will double revenue next year.",
+      "expected_status": "insufficient",
+      "sources": [{"source_id": "S1", "title": "Product update", "url": "https://example.org/product", "content": "The company announced a new product release but did not provide a revenue forecast."}]
+    },
+    {
+      "id": "wrong_entity",
+      "claim": "Acme Corporation acquired Beta Ltd in 2024.",
+      "expected_status": "insufficient",
+      "sources": [{"source_id": "S1", "title": "Company update", "url": "https://example.org/company", "content": "Acme Corporation announced a partnership with Beta Ltd in 2024. No acquisition was announced."}]
+    },
+    {
+      "id": "explicit_opposite_value",
+      "claim": "The trial enrolled 500 participants.",
+      "expected_status": "contradicted",
+      "sources": [{"source_id": "S1", "title": "Trial summary", "url": "https://example.org/trial", "content": "The trial enrolled 250 participants across three locations."}]
+    }
+  ]
+}
